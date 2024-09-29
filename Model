@@ -1,0 +1,314 @@
+library(dplyr)
+library(xgboost)
+library(ggplot2)
+library(caret)
+library(vip)
+library(randomForest)
+
+
+
+
+fivethirtyeight <- read.csv("538 Ratings.csv")
+barthome <- read.csv("Barttorvik Home.csv")
+bartaway <- read.csv("Barttorvik Away.csv")
+bartneutral <- read.csv("Barttorvik Neutral.csv")
+coach <- read.csv("Coach Results.csv")
+conf <- read.csv("Conference Results.csv")
+heat <- read.csv("Heat Check Tournament Index.csv")
+kenpom <- read.csv("KenPom Barttorvik.csv")
+resumes <- read.csv("Resumes.csv")
+matchups <- read.csv("Tournament Matchups.csv")
+results <- read.csv("Team Results.csv")
+
+# use matchups dataset to create columns for winning seed, losing seed
+# and such that matchups are in the same row
+
+#remove 2024 matchups
+
+matchupsclean <- matchups %>% 
+  filter(!is.na(matchups$BY.ROUND.NO))
+
+# join all other data. should be roughly enough data for 50 or so columns
+kenpomclean <- kenpom %>%
+  filter(YEAR != 2024)
+
+# select the win percentage as our tie breaker method for finals (1st seed vs 1st seed)
+
+matchupsclean <- matchupsclean %>%
+  left_join(select(kenpomclean, TEAM, YEAR, WIN.), by = c("TEAM" = "TEAM", "YEAR" = "YEAR"))
+
+
+#matchups are in groups of two rows. we can create matchup ids for every two rows
+# to help with our other operations in the next step
+matchupsclean <- matchupsclean %>%
+  mutate(matchup_id = rep(1:(nrow(.) / 2), each = 2))
+
+#now that we have grouped by matchup id, we have all matchups in one row, 
+processed_matchups <- matchupsclean %>%
+  group_by(matchup_id) %>%
+  summarise(year = first(YEAR),
+            round = first(CURRENT.ROUND), 
+            highseedteam = if_else(SEED[1] == SEED[2],
+                                   if_else(WIN.[1] > WIN.[2], TEAM[1], TEAM[2]), 
+                                   TEAM[which.min(SEED)]),
+            lowseedteam = if_else(SEED[1] == SEED[2],
+                                  if_else(WIN.[1] > WIN.[2], TEAM[2], TEAM[1]), 
+                                  TEAM[which.max(SEED)]),
+            highseed = min(SEED),
+            lowseed = max(SEED),
+            highseedno = TEAM.NO[which.min(SEED)], 
+            lowseedno = TEAM.NO[which.max(SEED)],
+            highseedscore = if_else(SEED[1] == SEED[2],
+                                    if_else(WIN.[1] > WIN.[2], SCORE[1], SCORE[2]), 
+                                    SCORE[which.min(SEED)]),
+            lowseedscore = if_else(SEED[1] == SEED[2],
+                                   if_else(WIN.[1] > WIN.[2], SCORE[2], SCORE[1]), 
+                                   SCORE[which.max(SEED)]),
+            highseed_win = as.integer(SCORE[which.min(SEED)] > SCORE[which.max(SEED)]))
+
+# we want to left join the data here: keep all data from matchups df, and wherever the join function finds a
+# match, include the advanced stats data from kenpomclean. don't want to lose any rows from original df
+highercombined <- merge(processed_matchups, kenpomclean, by.x =c("highseedteam", "year"), by.y = c("TEAM", "YEAR"), all.x = TRUE)
+
+
+adv <- names(winnerscombineclean)[13:69]
+
+
+winnerscombinedclean <- highercombined %>%
+  select(year, round, CONF,  highseedteam, lowseedteam, highseed, lowseed, highseedno, lowseedno,
+         highseedscore, lowseedscore, highseed_win, K.TEMPO, KADJ.T, K.OFF, KADJ.O,
+         K.DEF, KADJ.D, KADJ.EM, BADJ.EM, BADJ.O, BADJ.D, BADJ.T, BARTHAG, WIN.,
+         EFG., EFG.D, FTR, FTRD, TOV., TOV.D, OREB., DREB., OP.OREB.)
+
+winnerscombinedclean <- highercombined[, 1:76]
+winnerscombinedclean <- winnerscombinedclean %>%
+  select(-matches(".RANK"))
+winnerscombinedclean <- winnerscombinedclean %>%
+  select(-CONF, -CONF.ID, -QUAD.NO, -QUAD.ID, -TEAM.NO, -TEAM.ID, -SEED, -ROUND)
+
+names(winnerscombinedclean)[names(winnerscombinedclean) %in% adv] <- paste("higher", names(winnerscombinedclean)[names(winnerscombinedclean) %in% adv], sep = "_")
+
+
+lowercombined <- merge(processed_matchups, kenpomclean, by.x =c("lowseedteam", "year"), by.y = c("TEAM", "YEAR"), all.x = TRUE)
+
+
+loserscombinedclean <- lowercombined %>%
+  select(year, round, CONF,  highseedteam, lowseedteam, highseed, lowseed, highseedno, lowseedno,
+         highseedscore, lowseedscore, highseed_win, K.TEMPO, KADJ.T, K.OFF, KADJ.O,
+         K.DEF, KADJ.D, KADJ.EM, BADJ.EM, BADJ.O, BADJ.D, BADJ.T, BARTHAG, WIN.,
+         EFG., EFG.D, FTR, FTRD, TOV., TOV.D, OREB., DREB., OP.OREB.)
+
+loserscombinedclean <- lowercombined[, 1:76]
+loserscombinedclean <- loserscombinedclean %>%
+  select(-matches(".RANK"))
+loserscombinedclean <- loserscombinedclean %>%
+  select(-CONF, -CONF.ID, -QUAD.NO, -QUAD.ID, -TEAM.NO, -TEAM.ID, -SEED, -ROUND)
+
+names(loserscombinedclean)[names(loserscombinedclean) %in% adv] <- paste("lower", names(loserscombinedclean)[names(loserscombinedclean) %in% adv], sep = "_")
+
+loserscombinedclean <- loserscombinedclean %>%
+  select(-year, -round,  -highseedteam, -lowseedteam, -highseed, -lowseed, -highseedno,
+         -lowseedno, -highseedscore, -lowseedscore, -highseed_win)
+
+adv <- names(loserscombinedclean)[13:69]
+
+finalfeature <- cbind(winnerscombinedclean, loserscombinedclean)
+
+finalfeature <- na.omit(finalfeature)
+
+finalfeature <- finalfeature %>%
+  select(-matchup_id)
+
+finalfeatures <- finalfeature %>%
+  select(-higher_GAMES, -higher_W, -higher_L, -lower_GAMES, -lower_W, -lower_L)
+traindata <- finalfeatures %>%
+  filter(!year %in% c(2021, 2022, 2023))
+
+testdata <- finalfeatures %>%
+  filter(year %in% c(2021, 2022, 2023))
+
+
+traindataclean <- traindata %>%
+  select(-year, -highseedteam, -lowseedteam, -highseedno, -lowseedno, -highseedscore,
+         -lowseedscore, -highseed, -lowseed)
+
+testdataclean <- testdata %>%
+  select(-year, -highseedteam, -lowseedteam, -highseedno, -lowseedno, -highseedscore,
+         -lowseedscore, -highseed, -lowseed)
+
+
+traindataencoded <- traindataclean %>%
+  select(-round)
+
+testdataencoded <- testdataclean %>%
+  select(-round)
+
+
+X_train <- traindataencoded %>%
+  select(-highseed_win)
+
+x_test <- testdataencoded %>%
+  select(-highseed_win)
+
+X_train <- as.matrix(X_train)
+y_train <- traindataencoded$highseed_win
+
+y_test <- testdataencoded$highseed_win
+x_test <- as.matrix(x_test)
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest <- xgb.DMatrix(data = x_test, label = y_test)
+
+params <- list(
+  objective = "binary:logistic",
+  eta = 0.01,
+  max_depth = 5,
+  min_child_weight = 3,
+  alpha = 0.001,
+  gamma = 0.1
+)
+
+num_round <- 150  # Number of boosting rounds
+
+set.seed(1234)
+# Train the model
+xgboost <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = num_round,
+  verbose = 1
+)
+
+preds <- predict(xgboost, dtest)
+
+vip(xgboost)
+
+testdatapreds <- cbind(testdata, preds)
+
+testdatapreds <- testdatapreds %>%
+  select(year, round, highseedteam, lowseedteam, highseed, lowseed, highseed_win, preds)
+
+brier_score <- mean((preds - y_test)^2)
+print(brier_score)
+
+
+log_loss <- -mean(y_test * log(preds) + (1 - y_test) * log(1 - preds))
+print(log_loss)
+
+#predict on 2024 data
+mens <- newmatchups %>%
+  filter(T1_ID < 2000 & T2_ID < 2000)
+
+newkenpom <- read.csv("KenPom Barttorvik.csv")
+
+newkenpom <- newkenpom %>%
+  filter(YEAR == 2024)
+
+newkenpom$TEAM = tolower(newkenpom$TEAM)
+
+mensmatchups <- left_join(mens, newkenpom, by = c("T1_Spelling" = "TEAM"))
+
+matchupscombined <- left_join(mensmatchups, newkenpom, by = c("T2_Spelling" = "TEAM"))
+
+summary(matchupscombined)
+
+newkenpom$TEAM[newkenpom$TEAM == "connecticut"] = "uconn"
+newkenpom$TEAM[newkenpom$TEAM == "iowa st."] = "iowa state"
+
+
+newkenpom <- newkenpom %>%
+  mutate(TEAM = case_when(
+    TEAM == "san diego st." ~ "san diego state",
+    TEAM == "utah st." ~ "utah state",
+    TEAM == "washington st." ~ "washington state",
+    TEAM == "mississippi st." ~ "mississippi state",
+    TEAM == "michigan st." ~ "michigan state",
+    TEAM == "colorado st." ~ "colorado state",
+    TEAM == "boise st." ~ "boise state",
+    TEAM == "grambling st." ~ "grambling state",
+    TEAM == "morehead st." ~ "morehead state",
+    TEAM == "long beach st." ~ "long beach state",
+    TEAM == "south dakota st." ~ "south dakota state",
+    TEAM == "north carolina st." ~ "north carolina state",
+    TEAM == "college of charleston" ~ "charleston",
+    TEAM == "mcneese st." ~ "mcneese",
+    TEAM == "montana st." ~ "montana state",
+    TRUE ~ TEAM
+  ))
+
+summary(mensmatchups)
+
+
+names(mensmatchups)[names(mensmatchups) %in% adv] <- paste("higher", names(mensmatchups)[names(mensmatchups) %in% adv], sep = "_")
+names(newkenpom)[names(newkenpom) %in% adv] <- paste("lower", names(newkenpom)[names(newkenpom) %in% adv], sep = "_")
+
+matchupscombined <- matchupscombined %>%
+  select(-matches(".RANK"))
+
+matchupscombinedclean <- matchupscombined %>%
+  select(-higher_CONF, -higher_CONF.ID, -higher_QUAD.NO, -higher_QUAD.ID, -higher_TEAM.NO,  -higher_SEED, -higher_ROUND,
+         -lower_CONF, -lower_CONF.ID, -lower_QUAD.NO, -lower_QUAD.ID, -lower_TEAM.NO, -lower_SEED, -lower_ROUND)
+
+summary(matchupscombinedclean)
+
+
+twentyfourff <- matchupscombinedclean %>%
+  select(-X, -T1_Spelling, -T2_Spelling, -YEAR.x, -higher_TEAM.ID, -YEAR.y, -lower_TEAM.ID,
+         -higher_W, -higher_L, -lower_W, -lower_L, -T1_Seed, -T2_Seed, -higher_GAMES, -lower_GAMES)
+
+names(dtrain)
+
+x_test <- testdataencoded %>%
+  select(-highseed_win)  # Ensure this is your features without the outcome variable
+
+t <- as.matrix(twentyfourff)
+
+# Predictions for 2024
+preds_2024 <- predict(xgboost, t)
+
+names(twentyfourff)
+names(x_test)
+
+# If you want to attach these predictions back to the test data for interpretation:
+testdata$result_predictions <- preds_2024
+
+matchupscombinedclean$preds <- preds_2024
+
+summary(matchupscombinedclean)
+
+twentyfourpredictions <- matchupscombinedclean %>%
+  select(T1_Spelling, T1_ID, T1_Seed, T2_Spelling, T2_ID, T2_Seed, preds)
+
+filtered_dataset <- subset(testdatapreds, preds >= 0.68 & preds <= 0.70)
+
+brier_score <- mean((testdatapreds$preds - filtered_dataset$highseed_win)^2)
+print(brier_score)
+
+twentyonebracket <- testdatapreds %>%
+  filter(year == 2021)
+
+twentytwobracket <- testdatapreds %>%
+  filter(year == 2022)
+twentythreebracket <- testdatapreds %>%
+  filter(year == 2023)
+
+brier_score <- mean((twentythreebracket$preds - twentythreebracket$highseed_win)^2)
+print(brier_score)
+
+
+brier_score <- mean((twentytwobracket$preds - twentytwobracket$highseed_win)^2)
+print(brier_score)
+
+brier_score <- mean((twentyonebracket$preds - twentyonebracket$highseed_win)^2)
+print(brier_score)
+
+
+
+vip(xgboost)
+
+write.csv(twentyfourpredictions, "/Users/shekharshah/Downloads/twentyfourpredictions.csv" )
+
+
+
+
+
